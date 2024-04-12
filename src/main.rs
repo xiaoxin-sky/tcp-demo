@@ -1,17 +1,53 @@
 use std::io::{self, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::thread;
 
-fn main() {
-    let listener = TcpListener::bind("127.0.0.1:3363").expect("Failed to bind address");
+fn handle_client(mut source_stream: TcpStream, target_addr: String) -> io::Result<()> {
+    let mut target_stream = TcpStream::connect(target_addr)?;
 
-    println!("Server listening on port 3363...");
+    // 将源 TcpStream 的数据复制到目标 TcpStream，反之亦然
+    let mut source_clone = source_stream.try_clone()?;
+    let mut target_clone = target_stream.try_clone()?;
+    let a = BufReader::new(source_clone);
 
+    let source_to_target = thread::spawn(move || {
+        io::copy(&mut source_clone, &mut target_stream).ok();
+    });
+
+    let target_to_source = thread::spawn(move || {
+        io::copy(&mut target_clone, &mut source_stream).ok();
+    });
+
+    source_to_target.join().unwrap();
+    
+    target_to_source.join().unwrap();
+    // loop {
+    //     if target_to_source.is_finished() || source_to_target.is_finished() {
+    //         source_clone.shutdown(std::net::Shutdown::Both).unwrap();
+    //         break;
+    //     }
+    // }
+    println!("完成");
+
+    Ok(())
+}
+
+fn main() -> io::Result<()> {
+    // 建立一个 TcpListener 以监听来自客户端的连接
+    let listener = TcpListener::bind("127.0.0.1:3363")?;
+
+    // 指定目标服务器的地址
+    let target_addr = "43.139.176.137:7001".to_string();
+
+    // 接受来自客户端的连接并为每个连接启动一个线程来处理
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => {
-                println!("开启一个新的链接{}", stream.peer_addr().unwrap());
-                std::thread::spawn(move || {
-                    handle_client(stream);
+            Ok(source_stream) => {
+                let target_addr = target_addr.clone();
+                thread::spawn(move || {
+                    if let Err(err) = handle_client(source_stream, target_addr) {
+                        eprintln!("Error handling client: {}", err);
+                    }
                 });
             }
             Err(e) => {
@@ -19,85 +55,5 @@ fn main() {
             }
         }
     }
-}
-
-fn handle_client(stream: TcpStream) -> io::Result<()> {
-    let reader = BufReader::new(&stream);
-    // 报文首部
-    let mut header = Vec::<u8>::new();
-    // 报文体
-    let mut body = Vec::<u8>::new();
-    // 报文首部提取到的 Content-Length 长度
-    let mut content_len: Option<usize> = None;
-
-    for byte in reader.bytes() {
-        let byte = byte?;
-
-        if content_len.is_some() {
-            body.push(byte);
-            // body 内容已经填充完毕
-            if body.len() >= content_len.unwrap_or(0) {
-                break;
-            }
-        } else {
-            header.push(byte);
-
-            // 从报文首部中提取内容长度
-            content_len = extract_content_len(&header);
-            if let Some(len) = content_len {
-                // 如果报文长度是0说明没有 报文体，说明已经读取完成了，退出读取流
-                if len == 0 {
-                    break;
-                }
-            }
-        }
-    }
-
-    let str = format!("内容长度{}", content_len.unwrap_or(0));
-    serve_res(stream, str.as_bytes())?;
-    Ok(())
-}
-
-/// 从 header 中提取出 Content-Length 长度
-fn extract_content_len(header: &[u8]) -> Option<usize> {
-    if header.len() < 4 {
-        return None;
-    }
-
-    // 最后四个字节
-    let last_four = &header[header.len() - 4..];
-
-    match last_four.eq(b"\r\n\r\n") {
-        true => {
-            let header_str = String::from_utf8_lossy(header);
-            for line in header_str.lines() {
-                let line = line.trim();
-                println!("{line}");
-                if line.starts_with("Content-Length:") {
-                    let content_size = line
-                        .split_whitespace()
-                        .nth(1)
-                        .unwrap()
-                        .parse::<usize>()
-                        .unwrap();
-                    return Some(content_size);
-                }
-            }
-            None
-        }
-        false => None,
-    }
-}
-
-fn serve_res(mut steam: TcpStream, data: &[u8]) -> io::Result<()> {
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/html; charset=utf-8\r\n\r\n",
-        data.len(),
-    );
-
-    steam.write_all(response.as_bytes())?;
-    steam.write_all(data)?;
-    steam.flush()?;
-    steam.shutdown(std::net::Shutdown::Both)?;
     Ok(())
 }
